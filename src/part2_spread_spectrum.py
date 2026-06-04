@@ -49,8 +49,27 @@ def generate_m_sequence(register_state, taps, length=None):
     if length <= 0:
         raise ValueError('length must be positive')
 
-    # TODO: clock the LFSR and map output bits to bipolar chips.
-    raise NotImplementedError('请实现 m 序列生成')
+    # --- m 序列生成 (LFSR) ---
+    # 将寄存器状态转换为列表便于操作
+    state = list(state)
+    if length is None:
+        length = 2 ** len(state) - 1
+
+    chips = np.empty(length, dtype=float)
+    for i in range(length):
+        # 输出最右端的比特，映射为双极性：0 -> +1, 1 -> -1
+        output_bit = state[-1]
+        chips[i] = 1.0 if output_bit == 0 else -1.0
+
+        # 计算反馈：XOR 所有抽头位置对应的比特
+        feedback = 0
+        for tap in taps:
+            feedback ^= state[tap - 1]
+
+        # 移位：反馈插入左端，其余右移（丢弃最右端）
+        state = [feedback] + state[:-1]
+
+    return chips
 
 
 def dsss_spread(bits, pn_chips):
@@ -65,8 +84,14 @@ def dsss_spread(bits, pn_chips):
     if bits.ndim != 1 or not np.all((bits == 0) | (bits == 1)):
         raise ValueError('bits must be a one-dimensional binary array')
 
-    # TODO: BPSK-map each bit and multiply by the PN chips.
-    raise NotImplementedError('请实现 DSSS 扩频')
+    # --- DSSS 扩频 ---
+    # BPSK 映射：0 -> +1, 1 -> -1
+    bpsk_symbols = 1.0 - 2.0 * bits  # shape: (num_bits,)
+
+    # 扩频：每个 BPSK 符号与完整 PN 序列相乘
+    chips = np.outer(bpsk_symbols, pn_chips).ravel()
+
+    return chips
 
 
 def dsss_despread(received_chips, pn_chips):
@@ -81,8 +106,20 @@ def dsss_despread(received_chips, pn_chips):
     if received_chips.ndim != 1 or len(received_chips) % len(pn_chips) != 0:
         raise ValueError('received_chips length must be a multiple of PN length')
 
-    # TODO: reshape by spreading factor, correlate with PN chips, and decide bits.
-    raise NotImplementedError('请实现 DSSS 解扩')
+    # --- DSSS 解扩 ---
+    sf = len(pn_chips)  # 扩频因子
+    num_symbols = len(received_chips) // sf
+
+    # 重塑为 (num_symbols, sf)，每行对应一个符号的码片
+    chip_matrix = received_chips.reshape(num_symbols, sf)
+
+    # 与 PN 序列做相关（内积）
+    correlations = chip_matrix @ pn_chips  # shape: (num_symbols,)
+
+    # 硬判决：非负 -> bit 0，负 -> bit 1
+    recovered_bits = (correlations < 0).astype(int)
+
+    return recovered_bits
 
 
 def processing_gain_db(spreading_factor):
@@ -90,8 +127,8 @@ def processing_gain_db(spreading_factor):
     if spreading_factor <= 0:
         raise ValueError('spreading_factor must be positive')
 
-    # TODO: compute 10 * log10(N).
-    raise NotImplementedError('请实现处理增益计算')
+    # --- 处理增益计算 ---
+    return 10.0 * np.log10(float(spreading_factor))
 
 
 def despread_with_timing_offset(received_chips, pn_chips, max_offset):
@@ -99,8 +136,38 @@ def despread_with_timing_offset(received_chips, pn_chips, max_offset):
     if max_offset < 0:
         raise ValueError('max_offset must be non-negative')
 
-    # TODO: 选做：请实现同步偏移搜索解扩。
-    raise NotImplementedError('选做：请实现同步偏移搜索')
+    # --- 同步偏移搜索解扩 ---
+    sf = len(pn_chips)  # 扩频因子
+    best_offset = 0
+    best_corr_magnitude = -1.0
+    best_bits = None
+
+    for offset in range(max_offset + 1):
+        # 从当前偏移开始截取码片，并截断为 SF 的整数倍
+        chips = received_chips[offset:]
+        usable_len = (len(chips) // sf) * sf
+        if usable_len == 0:
+            continue
+        chips = chips[:usable_len]
+
+        # 解扩
+        num_symbols = usable_len // sf
+        chip_matrix = chips.reshape(num_symbols, sf)
+        correlations = chip_matrix @ pn_chips  # shape: (num_symbols,)
+
+        # 平均相关幅度作为同步质量度量
+        avg_magnitude = np.mean(np.abs(correlations))
+
+        if avg_magnitude > best_corr_magnitude:
+            best_corr_magnitude = avg_magnitude
+            best_offset = offset
+            # 硬判决：非负 -> bit 0，负 -> bit 1
+            best_bits = (correlations < 0).astype(int)
+
+    if best_bits is None:
+        raise ValueError('max_offset too small, no valid symbol recovered')
+
+    return best_bits
 
 
 def _correlation_values(received_chips, pn_chips):
